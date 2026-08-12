@@ -15,8 +15,8 @@ kind: PipelineRun
 metadata:
   name: pipelines-vote-ui-push
   annotations:
-    # Run on every push to master
-    pipelinesascode.tekton.dev/on-event: "[push]"
+    # Run on push to master and on pull requests targeting master
+    pipelinesascode.tekton.dev/on-event: "[push, pull_request]"
     pipelinesascode.tekton.dev/on-target-branch: "[master]"
     # PAC max keep — only keep the last 5 PipelineRun records
     pipelinesascode.tekton.dev/max-keep-runs: "5"

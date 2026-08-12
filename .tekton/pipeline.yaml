@@ -98,6 +98,9 @@ spec:
           - build-image
         taskRef:
           name: apply-manifests
+        workspaces:
+          - name: source
+            workspace: shared-workspace
 
       # Step 4: patch the Deployment to roll out the new image
       - name: update-deployment

@@ -1,0 +1,34 @@
+# Custom Task: apply-manifests
+# Applies Kubernetes/OpenShift manifests from a workspace to the cluster.
+# Sourced from the pipelines-tutorial (pipelines-1.23 branch).
+#
+# Source: https://raw.githubusercontent.com/openshift/pipelines-tutorial/pipelines-1.23/01_pipeline/01_apply_manifest_task.yaml
+# Install: oc create -f apply-manifest-task.yaml -n pipelines-tutorial
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: apply-manifests
+spec:
+  workspaces:
+  - name: source
+  steps:
+  - name: apply
+    image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+    script: |
+      #!/usr/bin/env bash
+      set -e
+      echo Applying manifests in $(inputs.params.manifest_dir) directory
+      oc apply -f $(workspaces.source.path)/$(params.manifest_dir)
+      echo -----------------------------------
+    env:
+    - name: NAMESPACE
+      value: $(params.namespace)
+  params:
+  - name: manifest_dir
+    description: The directory in source that contains yaml manifests
+    type: string
+    default: "k8s"
+  - name: namespace
+    description: The OpenShift namespace to apply manifests into
+    type: string
+    default: "pipelines-tutorial"

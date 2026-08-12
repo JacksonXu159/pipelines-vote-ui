@@ -1,0 +1,29 @@
+# Custom Task: update-deployment
+# Patches a Deployment's container image to a new tag.
+# Sourced from the pipelines-tutorial (pipelines-1.23 branch).
+#
+# Source: https://raw.githubusercontent.com/openshift/pipelines-tutorial/pipelines-1.23/01_pipeline/02_update_deployment_task.yaml
+# Install: oc create -f update-deployment-task.yaml -n pipelines-tutorial
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: update-deployment
+spec:
+  params:
+  - name: deployment
+    description: The name of the deployment patch the image
+    type: string
+  - name: IMAGE
+    description: Location of image to be patched with
+    type: string
+  steps:
+  - name: patch
+    image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+    script: |
+      #!/usr/bin/env bash
+      oc patch deployment $(params.deployment) --patch='{"spec":{"template":{"spec":{
+        "containers":[{
+          "name": "$(params.deployment)",
+          "image":"$(params.IMAGE)"
+        }]
+      }}}}'

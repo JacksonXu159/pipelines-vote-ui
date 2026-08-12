@@ -1,0 +1,112 @@
+---
+# Pipelines-as-Code pipeline for pipelines-vote-ui
+#
+# PAC annotations control when this runs:
+#   - on push to the master branch
+#   - on pull requests targeting master
+#
+# PAC replaces these variables at runtime:
+#   {{repo_url}}      → the HTTPS clone URL of the repo that triggered the event
+#   {{revision}}      → the SHA / branch ref of the commit
+#   {{repo_owner}}    → org or user (Jackson-Xu)
+#   {{repo_name}}     → repository name (pipelines-vote-ui)
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  name: pipelines-vote-ui-push
+  annotations:
+    # Run on every push to master
+    pipelinesascode.tekton.dev/on-event: "[push]"
+    pipelinesascode.tekton.dev/on-target-branch: "[master]"
+    # PAC max keep — only keep the last 5 PipelineRun records
+    pipelinesascode.tekton.dev/max-keep-runs: "5"
+    # Bundle local task definitions from .tekton/ so PAC can resolve them
+    pipelinesascode.tekton.dev/task: "[.tekton/apply-manifest-task.yaml, .tekton/update-deployment-task.yaml]"
+spec:
+  params:
+    - name: repo-url
+      value: "{{repo_url}}"
+    - name: revision
+      value: "{{revision}}"
+    - name: IMAGE
+      value: "image-registry.openshift-image-registry.svc:5000/poc-pipelines/pipelines-vote-ui:{{revision}}"
+  workspaces:
+    - name: shared-workspace
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 500Mi
+  pipelineSpec:
+    params:
+      - name: repo-url
+        type: string
+      - name: revision
+        type: string
+      - name: IMAGE
+        type: string
+    workspaces:
+      - name: shared-workspace
+    tasks:
+      # Step 1: clone the repo at the triggering commit
+      - name: fetch-repository
+        taskRef:
+          resolver: cluster
+          params:
+            - name: kind
+              value: task
+            - name: name
+              value: git-clone
+            - name: namespace
+              value: openshift-pipelines
+        workspaces:
+          - name: output
+            workspace: shared-workspace
+        params:
+          - name: URL
+            value: $(params.repo-url)
+          - name: REVISION
+            value: $(params.revision)
+          - name: DELETE_EXISTING
+            value: "true"
+
+      # Step 2: build the container image with buildah and push to the internal registry
+      - name: build-image
+        runAfter:
+          - fetch-repository
+        taskRef:
+          resolver: cluster
+          params:
+            - name: kind
+              value: task
+            - name: name
+              value: buildah
+            - name: namespace
+              value: openshift-pipelines
+        workspaces:
+          - name: source
+            workspace: shared-workspace
+        params:
+          - name: IMAGE
+            value: $(params.IMAGE)
+
+      # Step 3: apply k8s manifests from the repo's k8s/ directory
+      - name: apply-manifests
+        runAfter:
+          - build-image
+        taskRef:
+          name: apply-manifests
+
+      # Step 4: patch the Deployment to roll out the new image
+      - name: update-deployment
+        runAfter:
+          - apply-manifests
+        taskRef:
+          name: update-deployment
+        params:
+          - name: deployment
+            value: pipelines-vote-ui
+          - name: IMAGE
+            value: $(params.IMAGE)

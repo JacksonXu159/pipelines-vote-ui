@@ -17,7 +17,7 @@ metadata:
   annotations:
     # Run on push to master and on pull requests targeting master
     pipelinesascode.tekton.dev/on-event: "[push, pull_request]"
-    pipelinesascode.tekton.dev/on-target-branch: "[master]"
+    pipelinesascode.tekton.dev/on-target-branch: "[master, testbranch]"
     # PAC max keep — only keep the last 5 PipelineRun records
     pipelinesascode.tekton.dev/max-keep-runs: "5"
     # Bundle local task definitions from .tekton/ so PAC can resolve them

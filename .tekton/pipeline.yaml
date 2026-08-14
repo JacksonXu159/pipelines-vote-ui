@@ -113,3 +113,46 @@ spec:
             value: pipelines-vote-ui
           - name: IMAGE
             value: $(params.IMAGE)
+
+    # Finally block — runs regardless of whether the pipeline passed or failed
+    finally:
+      - name: pipeline-status
+        params:
+          - name: PIPELINE_RUN_NAME
+            value: $(context.pipelineRun.name)
+          - name: REPO_URL
+            value: $(params.repo-url)
+          - name: REVISION
+            value: $(params.revision)
+          - name: IMAGE
+            value: $(params.IMAGE)
+        taskSpec:
+          params:
+            - name: PIPELINE_RUN_NAME
+              type: string
+            - name: REPO_URL
+              type: string
+            - name: REVISION
+              type: string
+            - name: IMAGE
+              type: string
+          steps:
+            - name: print-status
+              image: registry.redhat.io/ubi9/ubi-minimal:latest
+              script: |
+                #!/usr/bin/env sh
+                echo ""
+                echo "=================================================="
+                echo "  Pipeline Run Summary"
+                echo "=================================================="
+                echo "  Run        : $(params.PIPELINE_RUN_NAME)"
+                echo "  Repo       : $(params.REPO_URL)"
+                echo "  Commit     : $(params.REVISION)"
+                echo "  Image      : $(params.IMAGE)"
+                echo "=================================================="
+                echo ""
+                echo "  NOTE: this task always runs — even if the"
+                echo "  pipeline failed — making it useful for"
+                echo "  notifications or cleanup."
+                echo "=================================================="
+                echo ""

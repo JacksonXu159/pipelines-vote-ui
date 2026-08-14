@@ -30,6 +30,8 @@ spec:
       value: "{{revision}}"
     - name: IMAGE
       value: "image-registry.openshift-image-registry.svc:5000/poc-pipelines/pipelines-vote-ui:{{revision}}"
+    - name: source-branch
+      value: "{{source_branch}}"
   workspaces:
     - name: shared-workspace
       volumeClaimTemplate:
@@ -46,6 +48,8 @@ spec:
       - name: revision
         type: string
       - name: IMAGE
+        type: string
+      - name: source-branch
         type: string
     workspaces:
       - name: shared-workspace
@@ -93,9 +97,14 @@ spec:
             value: $(params.IMAGE)
 
       # Step 3: apply k8s manifests from the repo's k8s/ directory
+      # when: only runs on master — skipped on feature branches
       - name: apply-manifests
         runAfter:
           - build-image
+        when:
+          - input: "$(params.source-branch)"
+            operator: in
+            values: ["master"]
         taskRef:
           name: apply-manifests
         workspaces:
@@ -103,9 +112,14 @@ spec:
             workspace: shared-workspace
 
       # Step 4: patch the Deployment to roll out the new image
+      # when: only runs on master — skipped on feature branches
       - name: update-deployment
         runAfter:
           - apply-manifests
+        when:
+          - input: "$(params.source-branch)"
+            operator: in
+            values: ["master"]
         taskRef:
           name: update-deployment
         params:

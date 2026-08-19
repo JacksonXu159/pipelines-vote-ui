@@ -21,7 +21,7 @@ metadata:
     # PAC max keep — only keep the last 5 PipelineRun records
     pipelinesascode.tekton.dev/max-keep-runs: "5"
     # Bundle local task definitions from .tekton/ so PAC can resolve them
-    pipelinesascode.tekton.dev/task: "[.tekton/update-image-in-git-task.yaml, .tekton/argocd-sync-and-wait-task.yaml, .tekton/smoke-test-task.yaml]"
+    pipelinesascode.tekton.dev/task: "[.tekton/lint-manifests-task.yaml, .tekton/update-image-in-git-task.yaml, .tekton/argocd-sync-and-wait-task.yaml, .tekton/smoke-test-task.yaml]"
 spec:
   params:
     - name: repo-url
@@ -100,12 +100,30 @@ spec:
           - name: IMAGE
             value: $(params.IMAGE)
 
-      # Step 3: patch k8s/deployment.yaml with the new image and push back to Git
+      # Step 3: lint and validate k8s/ manifests before touching Git
+      # when: only runs on master — skipped on feature branches
+      - name: lint-manifests
+        runAfter:
+          - build-image
+        when:
+          - input: "$(params.source-branch)"
+            operator: in
+            values: ["master"]
+        taskRef:
+          name: lint-manifests
+        workspaces:
+          - name: source
+            workspace: shared-workspace
+        params:
+          - name: manifest-dir
+            value: k8s
+
+      # Step 4: patch k8s/deployment.yaml with the new image and push back to Git
       # ArgoCD detects the change and auto-syncs the new image
       # when: only runs on master — skipped on feature branches
       - name: update-image-in-git
         runAfter:
-          - build-image
+          - lint-manifests
         when:
           - input: "$(params.source-branch)"
             operator: in

@@ -1,0 +1,182 @@
+# Task: lint-manifests
+#
+# Validates all YAML manifests in the k8s/ directory before they are
+# committed back to Git and picked up by ArgoCD.
+#
+# Three checks:
+#   1. yamllint    — YAML syntax validation (malformed YAML, bad indentation)
+#   2. kubeconform — Kubernetes schema validation (wrong fields, bad types,
+#                    unknown resource kinds including OpenShift CRDs)
+#   3. duplicates  — detects duplicate kind+name combinations across files
+#                    (would cause ArgoCD to apply one over the other silently)
+#
+# Runs BEFORE update-image-in-git so bad manifests never reach ArgoCD.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: lint-manifests
+spec:
+  description: >-
+    Lints and validates Kubernetes/OpenShift YAML manifests in the
+    specified directory. Catches YAML syntax errors, schema violations,
+    and duplicate resources before they are pushed to Git and synced
+    by ArgoCD.
+  params:
+    - name: manifest-dir
+      description: Directory containing the manifests to lint
+      type: string
+      default: k8s
+    - name: kubernetes-version
+      description: Kubernetes version to validate schemas against
+      type: string
+      default: "1.29.0"
+  workspaces:
+    - name: source
+      description: Workspace containing the cloned repository
+  steps:
+    # ------------------------------------------------------------------
+    # Step 1: YAML syntax check
+    # ------------------------------------------------------------------
+    - name: yaml-lint
+      image: registry.redhat.io/ubi9/python-311-minimal:latest
+      script: |
+        #!/usr/bin/env bash
+        set -e
+
+        pip install yamllint --quiet
+
+        MANIFEST_DIR="$(workspaces.source.path)/$(params.manifest-dir)"
+
+        echo "=================================================="
+        echo "  Step 1: YAML Syntax Check"
+        echo "  Directory: $MANIFEST_DIR"
+        echo "=================================================="
+        echo ""
+
+        # yamllint config — relaxed for k8s manifests (long lines are normal)
+        cat > /tmp/.yamllint <<EOF
+        extends: default
+        rules:
+          line-length:
+            max: 200
+          truthy:
+            allowed-values: ['true', 'false', 'yes', 'no']
+          comments:
+            min-spaces-from-content: 1
+        EOF
+
+        if yamllint -c /tmp/.yamllint "$MANIFEST_DIR"; then
+          echo ""
+          echo "==> YAML syntax: OK ✓"
+        else
+          echo ""
+          echo "==> YAML syntax errors found — fix before pushing"
+          exit 1
+        fi
+
+    # ------------------------------------------------------------------
+    # Step 2: Kubernetes schema validation (kubeconform)
+    # ------------------------------------------------------------------
+    - name: schema-validate
+      image: registry.redhat.io/ubi9/ubi-minimal:latest
+      script: |
+        #!/usr/bin/env bash
+        set -e
+
+        MANIFEST_DIR="$(workspaces.source.path)/$(params.manifest-dir)"
+        K8S_VERSION="$(params.kubernetes-version)"
+
+        echo "=================================================="
+        echo "  Step 2: Kubernetes Schema Validation"
+        echo "  Directory : $MANIFEST_DIR"
+        echo "  K8s version: $K8S_VERSION"
+        echo "=================================================="
+        echo ""
+
+        # Download kubeconform binary
+        KUBECONFORM_VERSION="v0.6.7"
+        curl -sSL \
+          "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+          | tar -xz -C /usr/local/bin kubeconform
+        chmod +x /usr/local/bin/kubeconform
+
+        # Run validation
+        # -ignore-missing-schemas: skip CRDs we don't have schemas for (e.g. Route)
+        # -strict: disallow extra fields not in the schema
+        # -summary: print a summary at the end
+        if kubeconform \
+            -kubernetes-version "$K8S_VERSION" \
+            -ignore-missing-schemas \
+            -strict \
+            -summary \
+            -output pretty \
+            "$MANIFEST_DIR"/*.yaml; then
+          echo ""
+          echo "==> Schema validation: OK ✓"
+        else
+          echo ""
+          echo "==> Schema validation failed — fix manifest errors before pushing"
+          exit 1
+        fi
+
+    # ------------------------------------------------------------------
+    # Step 3: Duplicate resource detection
+    # ------------------------------------------------------------------
+    - name: detect-duplicates
+      image: registry.redhat.io/ubi9/python-311-minimal:latest
+      script: |
+        #!/usr/bin/env bash
+        set -e
+
+        MANIFEST_DIR="$(workspaces.source.path)/$(params.manifest-dir)"
+
+        echo "=================================================="
+        echo "  Step 3: Duplicate Resource Detection"
+        echo "  Directory: $MANIFEST_DIR"
+        echo "=================================================="
+        echo ""
+
+        pip install pyyaml --quiet
+
+        python3 - "$MANIFEST_DIR" <<'PYEOF'
+        import sys
+        import os
+        import yaml
+
+        manifest_dir = sys.argv[1]
+        seen = {}
+        duplicates = []
+
+        for filename in sorted(os.listdir(manifest_dir)):
+            if not filename.endswith(('.yaml', '.yml')):
+                continue
+            filepath = os.path.join(manifest_dir, filename)
+            with open(filepath) as f:
+                # Handle multi-document YAML files
+                for doc in yaml.safe_load_all(f):
+                    if doc is None:
+                        continue
+                    kind = doc.get('kind', 'Unknown')
+                    name = doc.get('metadata', {}).get('name', 'Unknown')
+                    namespace = doc.get('metadata', {}).get('namespace', '')
+                    key = f"{kind}/{namespace}/{name}" if namespace else f"{kind}/{name}"
+
+                    if key in seen:
+                        duplicates.append(
+                            f"  DUPLICATE: {key}\n"
+                            f"    First seen in : {seen[key]}\n"
+                            f"    Also found in : {filename}"
+                        )
+                    else:
+                        seen[key] = filename
+                        print(f"  OK: {key} ({filename})")
+
+        print()
+        if duplicates:
+            print("==> Duplicate resources found:")
+            for d in duplicates:
+                print(d)
+            sys.exit(1)
+        else:
+            print(f"==> No duplicates found across {len(seen)} resources ✓")
+        PYEOF

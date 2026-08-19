@@ -21,7 +21,7 @@ metadata:
     # PAC max keep — only keep the last 5 PipelineRun records
     pipelinesascode.tekton.dev/max-keep-runs: "5"
     # Bundle local task definitions from .tekton/ so PAC can resolve them
-    pipelinesascode.tekton.dev/task: "[.tekton/apply-manifest-task.yaml, .tekton/update-deployment-task.yaml]"
+    pipelinesascode.tekton.dev/task: "[.tekton/argocd-sync-and-wait-task.yaml, .tekton/smoke-test-task.yaml]"
 spec:
   params:
     - name: repo-url
@@ -32,6 +32,8 @@ spec:
       value: "image-registry.openshift-image-registry.svc:5000/poc-pipelines/pipelines-vote-ui:{{revision}}"
     - name: source-branch
       value: "{{source_branch}}"
+    - name: argocd-app-name
+      value: "pipelines-vote-ui"
   workspaces:
     - name: shared-workspace
       volumeClaimTemplate:
@@ -50,6 +52,8 @@ spec:
       - name: IMAGE
         type: string
       - name: source-branch
+        type: string
+      - name: argocd-app-name
         type: string
     workspaces:
       - name: shared-workspace
@@ -96,9 +100,9 @@ spec:
           - name: IMAGE
             value: $(params.IMAGE)
 
-      # Step 3: apply k8s manifests from the repo's k8s/ directory
+      # Step 3: trigger ArgoCD sync and block until Synced + Healthy
       # when: only runs on master — skipped on feature branches
-      - name: apply-manifests
+      - name: argocd-sync-and-wait
         runAfter:
           - build-image
         when:
@@ -106,27 +110,27 @@ spec:
             operator: in
             values: ["master"]
         taskRef:
-          name: apply-manifests
-        workspaces:
-          - name: source
-            workspace: shared-workspace
+          name: argocd-sync-and-wait
+        params:
+          - name: application-name
+            value: $(params.argocd-app-name)
+          - name: revision
+            value: $(params.revision)
 
-      # Step 4: patch the Deployment to roll out the new image
+      # Step 4: smoke test — deploy a canary pod to prove the env is healthy
       # when: only runs on master — skipped on feature branches
-      - name: update-deployment
+      - name: smoke-test
         runAfter:
-          - apply-manifests
+          - argocd-sync-and-wait
         when:
           - input: "$(params.source-branch)"
             operator: in
             values: ["master"]
         taskRef:
-          name: update-deployment
+          name: smoke-test
         params:
-          - name: deployment
-            value: pipelines-vote-ui
-          - name: IMAGE
-            value: $(params.IMAGE)
+          - name: namespace
+            value: poc-pipelines
 
     # Finally block — runs regardless of whether the pipeline passed or failed
     finally:

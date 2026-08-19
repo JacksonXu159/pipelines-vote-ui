@@ -21,7 +21,7 @@ metadata:
     # PAC max keep — only keep the last 5 PipelineRun records
     pipelinesascode.tekton.dev/max-keep-runs: "5"
     # Bundle local task definitions from .tekton/ so PAC can resolve them
-    pipelinesascode.tekton.dev/task: "[.tekton/argocd-sync-and-wait-task.yaml, .tekton/smoke-test-task.yaml]"
+    pipelinesascode.tekton.dev/task: "[.tekton/update-image-in-git-task.yaml, .tekton/argocd-sync-and-wait-task.yaml, .tekton/smoke-test-task.yaml]"
 spec:
   params:
     - name: repo-url
@@ -100,11 +100,34 @@ spec:
           - name: IMAGE
             value: $(params.IMAGE)
 
-      # Step 3: trigger ArgoCD sync and block until Synced + Healthy
+      # Step 3: patch k8s/deployment.yaml with the new image and push back to Git
+      # ArgoCD detects the change and auto-syncs the new image
+      # when: only runs on master — skipped on feature branches
+      - name: update-image-in-git
+        runAfter:
+          - build-image
+        when:
+          - input: "$(params.source-branch)"
+            operator: in
+            values: ["master"]
+        taskRef:
+          name: update-image-in-git
+        workspaces:
+          - name: source
+            workspace: shared-workspace
+        params:
+          - name: repo-url
+            value: $(params.repo-url)
+          - name: revision
+            value: master
+          - name: image
+            value: $(params.IMAGE)
+
+      # Step 4: trigger ArgoCD sync and block until Synced + Healthy
       # when: only runs on master — skipped on feature branches
       - name: argocd-sync-and-wait
         runAfter:
-          - build-image
+          - update-image-in-git
         when:
           - input: "$(params.source-branch)"
             operator: in

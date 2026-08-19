@@ -1,0 +1,176 @@
+---
+# Pipelines-as-Code pipeline for pipelines-vote-ui
+#
+# PAC annotations control when this runs:
+#   - on push to the master branch
+#   - on pull requests targeting master
+#
+# PAC replaces these variables at runtime:
+#   {{repo_url}}      → the HTTPS clone URL of the repo that triggered the event
+#   {{revision}}      → the SHA / branch ref of the commit
+#   {{repo_owner}}    → org or user (Jackson-Xu)
+#   {{repo_name}}     → repository name (pipelines-vote-ui)
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  name: pipelines-vote-ui-push
+  annotations:
+    # Run on push to master and on pull requests targeting master
+    pipelinesascode.tekton.dev/on-event: "[push, pull_request]"
+    pipelinesascode.tekton.dev/on-target-branch: "[master, testbranch]"
+    # PAC max keep — only keep the last 5 PipelineRun records
+    pipelinesascode.tekton.dev/max-keep-runs: "5"
+    # Bundle local task definitions from .tekton/ so PAC can resolve them
+    pipelinesascode.tekton.dev/task: "[.tekton/argocd-sync-and-wait-task.yaml, .tekton/smoke-test-task.yaml]"
+spec:
+  params:
+    - name: repo-url
+      value: "{{repo_url}}"
+    - name: revision
+      value: "{{revision}}"
+    - name: IMAGE
+      value: "image-registry.openshift-image-registry.svc:5000/poc-pipelines/pipelines-vote-ui:{{revision}}"
+    - name: source-branch
+      value: "{{source_branch}}"
+    - name: argocd-app-name
+      value: "pipelines-vote-ui"
+  workspaces:
+    - name: shared-workspace
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 500Mi
+  pipelineSpec:
+    params:
+      - name: repo-url
+        type: string
+      - name: revision
+        type: string
+      - name: IMAGE
+        type: string
+      - name: source-branch
+        type: string
+      - name: argocd-app-name
+        type: string
+    workspaces:
+      - name: shared-workspace
+    tasks:
+      # Step 1: clone the repo at the triggering commit
+      - name: fetch-repository
+        taskRef:
+          resolver: cluster
+          params:
+            - name: kind
+              value: task
+            - name: name
+              value: git-clone
+            - name: namespace
+              value: openshift-pipelines
+        workspaces:
+          - name: output
+            workspace: shared-workspace
+        params:
+          - name: URL
+            value: $(params.repo-url)
+          - name: REVISION
+            value: $(params.revision)
+          - name: DELETE_EXISTING
+            value: "true"
+
+      # Step 2: build the container image with buildah and push to the internal registry
+      - name: build-image
+        runAfter:
+          - fetch-repository
+        taskRef:
+          resolver: cluster
+          params:
+            - name: kind
+              value: task
+            - name: name
+              value: buildah
+            - name: namespace
+              value: openshift-pipelines
+        workspaces:
+          - name: source
+            workspace: shared-workspace
+        params:
+          - name: IMAGE
+            value: $(params.IMAGE)
+
+      # Step 3: trigger ArgoCD sync and block until Synced + Healthy
+      # when: only runs on master — skipped on feature branches
+      - name: argocd-sync-and-wait
+        runAfter:
+          - build-image
+        when:
+          - input: "$(params.source-branch)"
+            operator: in
+            values: ["master"]
+        taskRef:
+          name: argocd-sync-and-wait
+        params:
+          - name: application-name
+            value: $(params.argocd-app-name)
+          - name: revision
+            value: $(params.revision)
+
+      # Step 4: smoke test — deploy a canary pod to prove the env is healthy
+      # when: only runs on master — skipped on feature branches
+      - name: smoke-test
+        runAfter:
+          - argocd-sync-and-wait
+        when:
+          - input: "$(params.source-branch)"
+            operator: in
+            values: ["master"]
+        taskRef:
+          name: smoke-test
+        params:
+          - name: namespace
+            value: poc-pipelines
+
+    # Finally block — runs regardless of whether the pipeline passed or failed
+    finally:
+      - name: pipeline-status
+        params:
+          - name: PIPELINE_RUN_NAME
+            value: $(context.pipelineRun.name)
+          - name: REPO_URL
+            value: $(params.repo-url)
+          - name: REVISION
+            value: $(params.revision)
+          - name: IMAGE
+            value: $(params.IMAGE)
+        taskSpec:
+          params:
+            - name: PIPELINE_RUN_NAME
+              type: string
+            - name: REPO_URL
+              type: string
+            - name: REVISION
+              type: string
+            - name: IMAGE
+              type: string
+          steps:
+            - name: print-status
+              image: registry.redhat.io/ubi9/ubi-minimal:latest
+              script: |
+                #!/usr/bin/env sh
+                echo ""
+                echo "=================================================="
+                echo "  Pipeline Run Summary"
+                echo "=================================================="
+                echo "  Run        : $(params.PIPELINE_RUN_NAME)"
+                echo "  Repo       : $(params.REPO_URL)"
+                echo "  Commit     : $(params.REVISION)"
+                echo "  Image      : $(params.IMAGE)"
+                echo "=================================================="
+                echo ""
+                echo "  NOTE: this task always runs — even if the"
+                echo "  pipeline failed — making it useful for"
+                echo "  notifications or cleanup."
+                echo "=================================================="
+                echo ""

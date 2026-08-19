@@ -78,7 +78,7 @@ spec:
     # Step 2: Kubernetes schema validation (kubeconform)
     # ------------------------------------------------------------------
     - name: schema-validate
-      image: registry.redhat.io/ubi9/ubi-minimal:latest
+      image: image-registry.openshift-image-registry.svc:5000/openshift/python:latest
       script: |
         #!/usr/bin/env bash
         set -e

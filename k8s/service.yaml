@@ -13,3 +13,21 @@ spec:
       protocol: TCP
   selector:
     app: pipelines-vote-ui
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pipelines-vote-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pipelines-vote-ui
+  template:
+    metadata:
+      labels:
+        app: pipelines-vote-ui
+    spec:
+      containers:
+        - name: duplicate-test
+          image: registry.redhat.io/ubi9/ubi-minimal:latest

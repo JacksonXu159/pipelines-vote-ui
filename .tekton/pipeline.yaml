@@ -152,8 +152,16 @@ spec:
         taskRef:
           name: smoke-test
         params:
+          - name: deployment-name
+            value: pipelines-vote-ui
           - name: namespace
             value: poc-pipelines
+          - name: service-name
+            value: pipelines-vote-ui
+          - name: service-port
+            value: "8080"
+          - name: health-path
+            value: "/"
 
     # Finally block — runs regardless of whether the pipeline passed or failed
     finally:

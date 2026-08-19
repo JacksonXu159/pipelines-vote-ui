@@ -1,93 +1,154 @@
 # Task: smoke-test
 #
-# Runs after argocd-sync-and-wait confirms the deployment is Synced + Healthy.
-# Deploys a minimal pod into the target namespace, waits for it to become
-# Ready, then cleans up. If the pod never becomes Ready it means the
-# ArgoCD deployment broke something in the environment.
+# Post-deploy health gate — runs after argocd-sync-and-wait confirms
+# the ArgoCD sync is complete.
 #
-# This is the post-deploy environment health gate.
+# Two-stage verification:
+#   Stage 1 — oc rollout status: confirms the Deployment's pods have
+#             all rolled over to the new ReplicaSet and are Ready.
+#             Catches: image pull failures, OOMKilled, bad probes, etc.
+#
+#   Stage 2 — HTTP health check: hits the app's in-cluster Service
+#             endpoint and asserts a 2xx response.
+#             Catches: app starts but crashes on first request, wrong
+#             port, misconfigured env vars that only surface at runtime.
+#
+# Both stages must pass for the pipeline to succeed.
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
   name: smoke-test
 spec:
   description: >-
-    Deploys a minimal canary pod into the target namespace and waits for it
-    to become Ready. A successful rollout proves the environment is still
-    functional after the ArgoCD sync. Cleans up the pod on exit.
+    Production-grade post-deploy health gate. Verifies the deployment
+    rolled out cleanly (rollout status) and that the app responds to
+    HTTP traffic (health check). Fails the pipeline if either check
+    does not pass within the configured timeouts.
   params:
+    - name: deployment-name
+      description: Name of the Deployment to verify
+      type: string
+      default: pipelines-vote-ui
     - name: namespace
-      description: Namespace to deploy the canary pod into
+      description: Namespace the Deployment lives in
       type: string
       default: poc-pipelines
-    - name: timeout
-      description: Seconds to wait for the canary pod to become Ready
+    - name: service-name
+      description: Name of the Service to health-check
       type: string
-      default: "120"
+      default: pipelines-vote-ui
+    - name: service-port
+      description: Port the Service exposes
+      type: string
+      default: "8080"
+    - name: health-path
+      description: HTTP path to check (should return 2xx)
+      type: string
+      default: "/"
+    - name: rollout-timeout
+      description: Seconds to wait for rollout to complete
+      type: string
+      default: "180"
+    - name: http-retries
+      description: Number of times to retry the HTTP check before failing
+      type: string
+      default: "12"
+    - name: http-retry-interval
+      description: Seconds between HTTP check retries
+      type: string
+      default: "5"
   steps:
-    - name: deploy-and-verify
+    # ------------------------------------------------------------------
+    # Stage 1: rollout status
+    # ------------------------------------------------------------------
+    - name: rollout-status
       image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
       script: |
         #!/usr/bin/env bash
         set -e
 
-        NAMESPACE="$(params.namespace)"
-        POD_NAME="smoke-test-$(context.taskRun.name)"
-
-        echo "==> Deploying canary pod: $POD_NAME in $NAMESPACE"
-
-        oc apply -n "$NAMESPACE" -f - <<EOF
-        apiVersion: v1
-        kind: Pod
-        metadata:
-          name: $POD_NAME
-          namespace: $NAMESPACE
-          labels:
-            app: smoke-test
-            pipeline-run: "$(context.pipelineRun.name)"
-        spec:
-          restartPolicy: Never
-          containers:
-            - name: canary
-              image: registry.redhat.io/ubi9/ubi-minimal:latest
-              command: ["sh", "-c", "echo 'smoke-test: OK' && sleep 10"]
-              resources:
-                requests:
-                  cpu: 10m
-                  memory: 32Mi
-        EOF
-
+        echo "=================================================="
+        echo "  Stage 1: Rollout Status"
+        echo "  Deployment : $(params.deployment-name)"
+        echo "  Namespace  : $(params.namespace)"
+        echo "  Timeout    : $(params.rollout-timeout)s"
+        echo "=================================================="
         echo ""
-        echo "==> Waiting for canary pod to become Ready (timeout: $(params.timeout)s)"
-        if oc wait pod/"$POD_NAME" \
-            -n "$NAMESPACE" \
-            --for=condition=Ready \
-            --timeout="$(params.timeout)s"; then
+
+        if oc rollout status deployment/"$(params.deployment-name)" \
+            -n "$(params.namespace)" \
+            --timeout="$(params.rollout-timeout)s"; then
           echo ""
-          echo "==> Canary pod is Ready ✓"
-          RESULT="PASSED"
+          echo "==> Rollout complete ✓"
         else
           echo ""
-          echo "==> Canary pod failed to become Ready"
-          oc describe pod/"$POD_NAME" -n "$NAMESPACE" || true
-          RESULT="FAILED"
-        fi
-
-        echo ""
-        echo "==> Cleaning up canary pod"
-        oc delete pod/"$POD_NAME" -n "$NAMESPACE" --ignore-not-found=true
-
-        if [ "$RESULT" = "FAILED" ]; then
+          echo "==> Rollout did not complete within $(params.rollout-timeout)s"
           echo ""
-          echo "=================================================="
-          echo "  Smoke test gate: FAILED"
-          echo "  The environment may be broken after the sync."
-          echo "=================================================="
+          echo "--- Deployment describe ---"
+          oc describe deployment/"$(params.deployment-name)" \
+            -n "$(params.namespace)" || true
+          echo ""
+          echo "--- Pod status ---"
+          oc get pods -n "$(params.namespace)" \
+            -l app="$(params.deployment-name)" || true
+          echo ""
+          echo "--- Recent pod events ---"
+          oc get events -n "$(params.namespace)" \
+            --field-selector reason!=Scheduled \
+            --sort-by='.lastTimestamp' | tail -20 || true
           exit 1
         fi
 
+    # ------------------------------------------------------------------
+    # Stage 2: HTTP health check
+    # ------------------------------------------------------------------
+    - name: http-healthcheck
+      image: registry.redhat.io/ubi9/ubi-minimal:latest
+      script: |
+        #!/usr/bin/env bash
+        set -e
+
+        URL="http://$(params.service-name).$(params.namespace).svc.cluster.local:$(params.service-port)$(params.health-path)"
+        RETRIES="$(params.http-retries)"
+        INTERVAL="$(params.http-retry-interval)"
+
+        echo "=================================================="
+        echo "  Stage 2: HTTP Health Check"
+        echo "  URL      : $URL"
+        echo "  Retries  : $RETRIES x ${INTERVAL}s"
+        echo "=================================================="
+        echo ""
+
+        for i in $(seq 1 "$RETRIES"); do
+          HTTP_STATUS=$(curl -s -o /tmp/response.txt -w "%{http_code}" \
+            --max-time 10 \
+            --connect-timeout 5 \
+            "$URL" 2>/dev/null || echo "000")
+
+          if [[ "$HTTP_STATUS" =~ ^2 ]]; then
+            echo "==> Attempt $i: HTTP $HTTP_STATUS ✓"
+            echo ""
+            echo "=================================================="
+            echo "  Smoke test gate: PASSED"
+            echo "  Rollout  : complete"
+            echo "  HTTP     : $HTTP_STATUS"
+            echo "  App      : $(params.deployment-name)"
+            echo "=================================================="
+            exit 0
+          fi
+
+          echo "==> Attempt $i/$RETRIES: HTTP $HTTP_STATUS — retrying in ${INTERVAL}s"
+          sleep "$INTERVAL"
+        done
+
+        echo ""
+        echo "==> App did not return 2xx after $RETRIES attempts"
+        echo ""
+        echo "--- Last response body ---"
+        cat /tmp/response.txt || true
         echo ""
         echo "=================================================="
-        echo "  Smoke test gate: PASSED"
-        echo "  Environment is healthy after ArgoCD sync."
+        echo "  Smoke test gate: FAILED"
+        echo "  HTTP check returned: $HTTP_STATUS"
         echo "=================================================="
+        exit 1

@@ -38,7 +38,7 @@ spec:
     # Step 1: YAML syntax check
     # ------------------------------------------------------------------
     - name: yaml-lint
-      image: registry.redhat.io/ubi9/python-311-minimal:latest
+      image: image-registry.openshift-image-registry.svc:5000/openshift/python:latest
       script: |
         #!/usr/bin/env bash
         set -e
@@ -123,7 +123,7 @@ spec:
     # Step 3: Duplicate resource detection
     # ------------------------------------------------------------------
     - name: detect-duplicates
-      image: registry.redhat.io/ubi9/python-311-minimal:latest
+      image: image-registry.openshift-image-registry.svc:5000/openshift/python:latest
       script: |
         #!/usr/bin/env bash
         set -e

@@ -97,14 +97,13 @@ spec:
         KUBECONFORM_VERSION="v0.6.7"
         curl -sSL \
           "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
-          | tar -xz -C /usr/local/bin kubeconform
-        chmod +x /usr/local/bin/kubeconform
+          | tar -xz -C /tmp kubeconform
 
         # Run validation
         # -ignore-missing-schemas: skip CRDs we don't have schemas for (e.g. Route)
         # -strict: disallow extra fields not in the schema
         # -summary: print a summary at the end
-        if kubeconform \
+        if /tmp/kubeconform \
             -kubernetes-version "$K8S_VERSION" \
             -ignore-missing-schemas \
             -strict \

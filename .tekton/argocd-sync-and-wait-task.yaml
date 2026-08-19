@@ -1,0 +1,111 @@
+# Task: argocd-sync-and-wait
+#
+# Triggers an ArgoCD application sync and blocks until the app is both
+# Synced and Healthy. The pipeline fails if ArgoCD reports a degraded
+# or errored state — this is the deployment health gate.
+#
+# Requires in the pipeline's namespace (poc-pipelines):
+#   ConfigMap  argocd-env-configmap  → key: ARGOCD_SERVER
+#   Secret     argocd-env-secret     → keys: ARGOCD_USERNAME, ARGOCD_PASSWORD
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: argocd-sync-and-wait
+spec:
+  description: >-
+    Syncs an ArgoCD application to a specific revision and waits for it to
+    reach Synced + Healthy. Fails the pipeline if the deployment is unhealthy,
+    acting as an automated deployment gate before any post-deploy tests run.
+  params:
+    - name: application-name
+      description: Name of the ArgoCD Application CR to sync
+      type: string
+    - name: revision
+      description: Git revision (SHA, branch, or tag) to sync to
+      type: string
+      default: HEAD
+    - name: sync-timeout
+      description: Seconds to wait for sync to complete
+      type: string
+      default: "300"
+    - name: health-timeout
+      description: Seconds to wait for healthy state after sync
+      type: string
+      default: "600"
+  stepTemplate:
+    envFrom:
+      - configMapRef:
+          name: argocd-env-configmap   # provides ARGOCD_SERVER
+      - secretRef:
+          name: argocd-env-secret      # provides ARGOCD_USERNAME + ARGOCD_PASSWORD
+  steps:
+    - name: sync-and-wait
+      image: quay.io/argoproj/argocd:v2.10.0
+      script: |
+        #!/usr/bin/env bash
+        set -e
+
+        # ------------------------------------------
+        # 1. Login
+        # ------------------------------------------
+        echo "==> Logging into ArgoCD: $ARGOCD_SERVER"
+        yes | argocd login "$ARGOCD_SERVER" \
+          --username="$ARGOCD_USERNAME" \
+          --password="$ARGOCD_PASSWORD" \
+          --grpc-web \
+          --insecure
+
+        # ------------------------------------------
+        # 2. Sync to the triggering commit
+        # ------------------------------------------
+        echo ""
+        echo "==> Syncing $(params.application-name) @ $(params.revision)"
+        if ! argocd app sync "$(params.application-name)" \
+            --revision "$(params.revision)" \
+            --prune \
+            --grpc-web 2>&1 | tee /tmp/sync.log; then
+          if grep -q "another operation is already in progress" /tmp/sync.log; then
+            echo "==> Sync already in progress — waiting for it to finish"
+          else
+            echo "==> Sync failed"
+            argocd app get "$(params.application-name)" --show-operation || true
+            exit 1
+          fi
+        fi
+
+        # ------------------------------------------
+        # 3. Wait for Synced
+        # ------------------------------------------
+        echo ""
+        echo "==> Waiting for Synced (timeout: $(params.sync-timeout)s)"
+        if ! argocd app wait "$(params.application-name)" \
+            --sync \
+            --grpc-web \
+            --timeout "$(params.sync-timeout)"; then
+          echo "==> Sync timed out or failed"
+          argocd app get "$(params.application-name)" --show-operation || true
+          exit 1
+        fi
+        echo "==> Synced ✓"
+
+        # ------------------------------------------
+        # 4. Wait for Healthy
+        # ------------------------------------------
+        echo ""
+        echo "==> Waiting for Healthy (timeout: $(params.health-timeout)s)"
+        if ! argocd app wait "$(params.application-name)" \
+            --health \
+            --grpc-web \
+            --timeout "$(params.health-timeout)"; then
+          echo "==> Application failed to reach Healthy state"
+          argocd app get "$(params.application-name)" || true
+          argocd app resources "$(params.application-name)" || true
+          exit 1
+        fi
+        echo "==> Healthy ✓"
+        echo ""
+        echo "=================================================="
+        echo "  Deployment gate: PASSED"
+        echo "  App    : $(params.application-name)"
+        echo "  Commit : $(params.revision)"
+        echo "=================================================="

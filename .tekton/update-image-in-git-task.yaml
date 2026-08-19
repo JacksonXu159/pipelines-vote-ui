@@ -48,7 +48,14 @@ spec:
         # Install git (minimal image needs it)
         microdnf install -y git --nodocs 2>/dev/null
 
-        cd "$(workspaces.source.path)"
+        REPO_DIR="$(workspaces.source.path)"
+        echo "==> Working in $REPO_DIR"
+        ls -la "$REPO_DIR"
+
+        cd "$REPO_DIR"
+
+        # Mark as safe for git (OpenShift runs as arbitrary UID)
+        git config --global --add safe.directory "$REPO_DIR"
 
         # Configure git identity
         git config user.email "tekton-pipeline@poc-pipelines"

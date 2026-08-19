@@ -1,0 +1,93 @@
+# Task: smoke-test
+#
+# Runs after argocd-sync-and-wait confirms the deployment is Synced + Healthy.
+# Deploys a minimal pod into the target namespace, waits for it to become
+# Ready, then cleans up. If the pod never becomes Ready it means the
+# ArgoCD deployment broke something in the environment.
+#
+# This is the post-deploy environment health gate.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: smoke-test
+spec:
+  description: >-
+    Deploys a minimal canary pod into the target namespace and waits for it
+    to become Ready. A successful rollout proves the environment is still
+    functional after the ArgoCD sync. Cleans up the pod on exit.
+  params:
+    - name: namespace
+      description: Namespace to deploy the canary pod into
+      type: string
+      default: poc-pipelines
+    - name: timeout
+      description: Seconds to wait for the canary pod to become Ready
+      type: string
+      default: "120"
+  steps:
+    - name: deploy-and-verify
+      image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+      script: |
+        #!/usr/bin/env bash
+        set -e
+
+        NAMESPACE="$(params.namespace)"
+        POD_NAME="smoke-test-$(context.taskRun.name)"
+
+        echo "==> Deploying canary pod: $POD_NAME in $NAMESPACE"
+
+        oc apply -n "$NAMESPACE" -f - <<EOF
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: $POD_NAME
+          namespace: $NAMESPACE
+          labels:
+            app: smoke-test
+            pipeline-run: "$(context.pipelineRun.name)"
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: canary
+              image: registry.redhat.io/ubi9/ubi-minimal:latest
+              command: ["sh", "-c", "echo 'smoke-test: OK' && sleep 10"]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+        EOF
+
+        echo ""
+        echo "==> Waiting for canary pod to become Ready (timeout: $(params.timeout)s)"
+        if oc wait pod/"$POD_NAME" \
+            -n "$NAMESPACE" \
+            --for=condition=Ready \
+            --timeout="$(params.timeout)s"; then
+          echo ""
+          echo "==> Canary pod is Ready ✓"
+          RESULT="PASSED"
+        else
+          echo ""
+          echo "==> Canary pod failed to become Ready"
+          oc describe pod/"$POD_NAME" -n "$NAMESPACE" || true
+          RESULT="FAILED"
+        fi
+
+        echo ""
+        echo "==> Cleaning up canary pod"
+        oc delete pod/"$POD_NAME" -n "$NAMESPACE" --ignore-not-found=true
+
+        if [ "$RESULT" = "FAILED" ]; then
+          echo ""
+          echo "=================================================="
+          echo "  Smoke test gate: FAILED"
+          echo "  The environment may be broken after the sync."
+          echo "=================================================="
+          exit 1
+        fi
+
+        echo ""
+        echo "=================================================="
+        echo "  Smoke test gate: PASSED"
+        echo "  Environment is healthy after ArgoCD sync."
+        echo "=================================================="
